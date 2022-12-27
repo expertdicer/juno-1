@@ -20,10 +20,18 @@ func EndBlocker(ctx sdk.Context, k keeper.Keeper) error {
 	defer telemetry.ModuleMeasureSince(types.ModuleName, time.Now(), telemetry.MetricKeyEndBlocker)
 
 	params := k.GetParams(ctx)
+
 	if isPeriodLastBlock(ctx, params.VotePeriod) {
+		// remove out of date history price
+		for _, denom := range params.PriceTrackingList {
+			removeTime := ctx.BlockTime().Add(-params.PriceTrackingDuration)
+			k.RemoveHistoryEntryBeforeTime(ctx, denom.BaseDenom, removeTime)
+		}
+
 		// Build claim map over all validators in active set
 		validatorClaimMap := make(map[string]types.Claim)
 		powerReduction := k.StakingKeeper.PowerReduction(ctx)
+
 		for _, v := range k.StakingKeeper.GetBondedValidatorsByPower(ctx) {
 			addr := v.GetOperator()
 			validatorClaimMap[addr.String()] = types.NewClaim(v.GetConsensusPower(powerReduction), 0, 0, addr)
@@ -55,6 +63,12 @@ func EndBlocker(ctx sdk.Context, k keeper.Keeper) error {
 			// Set the exchange rate, emit ABCI event
 			if err = k.SetExchangeRateWithEvent(ctx, ballotDenom.Denom, exchangeRate); err != nil {
 				return err
+			}
+
+			votingPeriodCount := (uint64(ctx.BlockHeight()) + 1) / params.VotePeriod
+			// set the price history
+			if _, found := k.IsInTrackingList(ctx, ballotDenom.Denom); found {
+				k.SetPriceHistoryEntry(ctx, ballotDenom.Denom, ctx.BlockTime(), exchangeRate, votingPeriodCount)
 			}
 		}
 

@@ -1,6 +1,10 @@
 package types
 
 import (
+	"fmt"
+	"strings"
+	time "time"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/address"
 )
@@ -14,6 +18,9 @@ const (
 
 	// QuerierRoute is the query router key for the oracle module
 	QuerierRoute = ModuleName
+
+	// RouterKey is the msg router key for the oracle module
+	RouterKey = ModuleName
 )
 
 // KVStore key prefixes
@@ -23,7 +30,16 @@ var (
 	KeyPrefixMissCounter                  = []byte{0x03} // prefix for each key to a miss counter
 	KeyPrefixAggregateExchangeRatePrevote = []byte{0x04} // prefix for each key to a aggregate prevote
 	KeyPrefixAggregateExchangeRateVote    = []byte{0x05} // prefix for each key to a aggregate vote
+	KeyPrefixPriceHistory                 = []byte{0x06} // prefix for price history
 )
+
+// Store price history <Prefix> <baseDenom> <votePeriodCount> <PriceHistoryEntry>
+func GetPriceHistoryKey(symbolDenom string) (key []byte) {
+	upperSymbolDenom := strings.ToUpper(symbolDenom)
+	key = append(key, KeyPrefixPriceHistory...)
+	key = append(key, []byte(upperSymbolDenom)...)
+	return append(key, 0) // append 0 for null-termination
+}
 
 // GetExchangeRateKey - stored by *denom*
 func GetExchangeRateKey(denom string) (key []byte) {
@@ -54,4 +70,30 @@ func GetAggregateExchangeRatePrevoteKey(v sdk.ValAddress) (key []byte) {
 func GetAggregateExchangeRateVoteKey(v sdk.ValAddress) (key []byte) {
 	key = append(key, KeyPrefixAggregateExchangeRateVote...)
 	return append(key, address.MustLengthPrefix(v)...)
+}
+
+var (
+	// Contract: Coin denoms cannot contain this character
+	KeySeparator = "|"
+
+	historicalTimeIndexNoSeparator = "historical_time_index"
+
+	// format is pool id | denom1 | denom2 | time
+	// made for efficiently getting records given (pool id, denom1, denom2) and time bounds
+	HistoricalTWAPTimeIndexPrefix = historicalTimeIndexNoSeparator + KeySeparator
+)
+
+func FormatTimeString(t time.Time) string {
+	return t.UTC().Round(0).Format(sdk.SortableTimeFormat)
+}
+
+func FormatHistoricalDenomIndexKey(accumulatorWriteTime time.Time, denom string) []byte {
+	timeS := FormatTimeString(accumulatorWriteTime)
+	upperDenom := strings.ToUpper(denom)
+	return []byte(fmt.Sprintf("%s%s%s%s", HistoricalTWAPTimeIndexPrefix, upperDenom, KeySeparator, timeS))
+}
+
+func FormatHistoricalDenomIndexPrefix(denom string) []byte {
+	upperDenom := strings.ToUpper(denom)
+	return []byte(fmt.Sprintf("%s%s%s", HistoricalTWAPTimeIndexPrefix, upperDenom, KeySeparator))
 }

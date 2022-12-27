@@ -3,7 +3,9 @@ package keeper
 import (
 	"context"
 
+	"github.com/cosmos/cosmos-sdk/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/query"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -247,5 +249,118 @@ func (q querier) AggregateVotes(
 
 	return &types.QueryAggregateVotesResponse{
 		AggregateVotes: votes,
+	}, nil
+}
+
+// PriceTrackingLists queries all price tracking lists
+func (q querier) PriceTrackingLists(
+	goCtx context.Context,
+	req *types.QueryPriceTrackingLists,
+) (*types.QueryPriceTrackingListsRespone, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "empty request")
+	}
+
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	params := q.GetParams(ctx)
+
+	var result []string
+	for _, trackingDenom := range params.PriceTrackingList {
+		result = append(result, trackingDenom.SymbolDenom)
+	}
+
+	return &types.QueryPriceTrackingListsRespone{
+		PriceTrakingLists: result,
+	}, nil
+}
+
+func (q querier) PriceHistoryAt(
+	goCtx context.Context,
+	req *types.QueryPriceHistoryAt,
+) (*types.QueryPriceHistoryAtRespone, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "empty request")
+	}
+
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	denom, found := q.IsInTrackingList(ctx, req.Denom)
+	if !found {
+		return nil, status.Errorf(codes.InvalidArgument, "Denom %s not in tracking list", req.Denom)
+	}
+
+	priceHistoryEntry, err := q.getHistoryEntryAtOrBeforeTime(ctx, req.Denom, req.Time)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.QueryPriceHistoryAtRespone{
+		Denom:             denom,
+		PriceHistoryEntry: priceHistoryEntry,
+	}, nil
+}
+
+func (q querier) AllPriceHistory(
+	goCtx context.Context,
+	req *types.QueryAllPriceHistory,
+) (*types.QueryAllPriceHistoryRespone, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "empty request")
+	}
+
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	denom, found := q.IsInTrackingList(ctx, req.Denom)
+	if !found {
+		return nil, status.Errorf(codes.InvalidArgument, "Denom %s not in tracking list", req.Denom)
+	}
+
+	store := ctx.KVStore(q.storeKey)
+	priceHistoryStore := prefix.NewStore(store, types.FormatHistoricalDenomIndexPrefix(req.Denom))
+
+	var priceHistoryEntrys []types.PriceHistoryEntry
+
+	pageRes, err := query.Paginate(priceHistoryStore, req.Pagination, func(key []byte, value []byte) error {
+		var priceHistoryEntry types.PriceHistoryEntry
+		if err := q.cdc.Unmarshal(value, &priceHistoryEntry); err != nil {
+			return err
+		}
+		priceHistoryEntrys = append(priceHistoryEntrys, priceHistoryEntry)
+		return nil
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &types.QueryAllPriceHistoryRespone{
+		Denom:              denom,
+		PriceHistoryEntrys: priceHistoryEntrys,
+		Pagination:         pageRes,
+	}, nil
+}
+
+func (q querier) TwapPrice(
+	goCtx context.Context,
+	req *types.QueryTwapBetween,
+) (*types.QueryTwapBetweenRespone, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "empty request")
+	}
+
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	_, found := q.IsInTrackingList(ctx, req.Denom)
+	if !found {
+		return nil, status.Errorf(codes.InvalidArgument, "Denom %s not in tracking list", req.Denom)
+	}
+
+	if req.StartTime.After(req.EndTime) {
+		return nil, status.Errorf(codes.InvalidArgument, "StartTime %v after Endtime %v", req.StartTime, req.EndTime)
+	}
+
+	twapPrice, err := q.GetArithmetricTWAP(ctx, req.Denom, req.StartTime, req.EndTime)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.QueryTwapBetweenRespone{
+		TwapPrice: sdk.NewDecCoinFromDec(req.Denom, twapPrice),
 	}, nil
 }

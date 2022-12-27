@@ -5,109 +5,43 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
-	"github.com/cosmos/cosmos-sdk/x/authz"
-	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	ibcante "github.com/cosmos/ibc-go/v3/modules/core/ante"
-	ibckeeper "github.com/cosmos/ibc-go/v3/modules/core/keeper"
+	ibcante "github.com/cosmos/ibc-go/v4/modules/core/ante"
+	ibckeeper "github.com/cosmos/ibc-go/v4/modules/core/keeper"
+
+	paramtypes "github.com/cosmos/cosmos-sdk/x/params/types"
 
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
-	wasmTypes "github.com/CosmWasm/wasmd/x/wasm/types"
-)
+	govkeeper "github.com/cosmos/cosmos-sdk/x/gov/keeper"
 
-var (
-	DefaultIsAppSimulation = false
+	wasmTypes "github.com/CosmWasm/wasmd/x/wasm/types"
+	decorators "github.com/CosmosContracts/juno/v12/app/decorators"
+
+	feeshareante "github.com/CosmosContracts/juno/v12/x/feeshare/ante"
+	feesharekeeper "github.com/CosmosContracts/juno/v12/x/feeshare/keeper"
+	gaiafeeante "github.com/cosmos/gaia/v8/x/globalfee/ante"
 )
 
 func updateAppSimulationFlag(flag bool) {
-	DefaultIsAppSimulation = flag
+	decorators.UpdateSimsFlag(flag)
 }
 
+const maxBypassMinFeeMsgGasUsage = 1_000_000
+
 // HandlerOptions extends the SDK's AnteHandler options by requiring the IBC
-// channel keeper.
+// channel keeper and a BankKeeper with an added method for fee sharing.
 type HandlerOptions struct {
 	ante.HandlerOptions
 
-	IBCKeeper         *ibckeeper.Keeper
-	TxCounterStoreKey sdk.StoreKey
-	WasmConfig        wasmTypes.WasmConfig
-	Cdc               codec.BinaryCodec
-}
-
-type MinCommissionDecorator struct {
-	cdc codec.BinaryCodec
-}
-
-func NewMinCommissionDecorator(cdc codec.BinaryCodec) MinCommissionDecorator {
-	return MinCommissionDecorator{cdc}
-}
-
-func (min MinCommissionDecorator) AnteHandle(
-	ctx sdk.Context, tx sdk.Tx,
-	simulate bool, next sdk.AnteHandler,
-) (newCtx sdk.Context, err error) {
-	if DefaultIsAppSimulation {
-		return next(ctx, tx, simulate)
-	}
-
-	msgs := tx.GetMsgs()
-	minCommissionRate := sdk.NewDecWithPrec(5, 2)
-
-	validMsg := func(m sdk.Msg) error {
-		switch msg := m.(type) {
-		case *stakingtypes.MsgCreateValidator:
-			// prevent new validators joining the set with
-			// commission set below 5%
-			c := msg.Commission
-			if c.Rate.LT(minCommissionRate) {
-				return sdkerrors.Wrap(sdkerrors.ErrUnauthorized, "commission can't be lower than 5%")
-			}
-		case *stakingtypes.MsgEditValidator:
-			// if commission rate is nil, it means only
-			// other fields are affected - skip
-			if msg.CommissionRate == nil {
-				break
-			}
-			if msg.CommissionRate.LT(minCommissionRate) {
-				return sdkerrors.Wrap(sdkerrors.ErrUnauthorized, "commission can't be lower than 5%")
-			}
-		}
-
-		return nil
-	}
-
-	validAuthz := func(execMsg *authz.MsgExec) error {
-		for _, v := range execMsg.Msgs {
-			var innerMsg sdk.Msg
-			err := min.cdc.UnpackAny(v, &innerMsg)
-			if err != nil {
-				return sdkerrors.Wrapf(sdkerrors.ErrUnauthorized, "cannot unmarshal authz exec msgs")
-			}
-
-			err = validMsg(innerMsg)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
-	for _, m := range msgs {
-		if msg, ok := m.(*authz.MsgExec); ok {
-			if err := validAuthz(msg); err != nil {
-				return ctx, err
-			}
-			continue
-		}
-
-		// validate normal msgs
-		err = validMsg(m)
-		if err != nil {
-			return ctx, err
-		}
-	}
-
-	return next(ctx, tx, simulate)
+	GovKeeper            govkeeper.Keeper
+	IBCKeeper            *ibckeeper.Keeper
+	FeeShareKeeper       feesharekeeper.Keeper
+	BankKeeperFork       feeshareante.BankKeeper
+	TxCounterStoreKey    sdk.StoreKey
+	WasmConfig           wasmTypes.WasmConfig
+	Cdc                  codec.BinaryCodec
+	BypassMinFeeMsgTypes []string
+	GlobalFeeSubspace    paramtypes.Subspace
+	StakingSubspace      paramtypes.Subspace
 }
 
 // NewAnteHandler returns an AnteHandler that checks and increments sequence
@@ -133,16 +67,20 @@ func NewAnteHandler(options HandlerOptions) (sdk.AnteHandler, error) {
 
 	anteDecorators := []sdk.AnteDecorator{
 		ante.NewSetUpContextDecorator(), // outermost AnteDecorator. SetUpContext must be called first
-		NewMinCommissionDecorator(options.Cdc),
+		decorators.NewMinCommissionDecorator(options.Cdc),
 		wasmkeeper.NewLimitSimulationGasDecorator(options.WasmConfig.SimulationGasLimit),
 		wasmkeeper.NewCountTXDecorator(options.TxCounterStoreKey),
 		ante.NewRejectExtensionOptionsDecorator(),
+		decorators.MsgFilterDecorator{},
+		decorators.NewGovPreventSpamDecorator(options.Cdc, options.GovKeeper),
 		ante.NewMempoolFeeDecorator(),
 		ante.NewValidateBasicDecorator(),
 		ante.NewTxTimeoutHeightDecorator(),
 		ante.NewValidateMemoDecorator(options.AccountKeeper),
 		ante.NewConsumeGasForTxSizeDecorator(options.AccountKeeper),
+		gaiafeeante.NewFeeDecorator(options.BypassMinFeeMsgTypes, options.GlobalFeeSubspace, options.StakingSubspace, maxBypassMinFeeMsgGasUsage),
 		ante.NewDeductFeeDecorator(options.AccountKeeper, options.BankKeeper, options.FeegrantKeeper),
+		feeshareante.NewFeeSharePayoutDecorator(options.BankKeeperFork, options.FeeShareKeeper),
 		// SetPubKeyDecorator must be called before all signature verification decorators
 		ante.NewSetPubKeyDecorator(options.AccountKeeper),
 		ante.NewValidateSigCountDecorator(options.AccountKeeper),
