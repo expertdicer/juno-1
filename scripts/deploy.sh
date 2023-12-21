@@ -10,7 +10,7 @@ export KEYRING=${KEYRING:-"test"}
 export HOME_DIR=$(eval echo "${HOME_DIR:-"~/.juno"}")
 export BINARY=${BINARY:-junod}
 
-junod tx wasm store scripts/cw20.wasm --from juno1 --keyring-backend test --chain-id local-1 --gas 10000000 --fees 25000ujuno -y 
+junod tx wasm store scripts/cw20_sudo.wasm --from juno1 --keyring-backend test --chain-id local-1 --gas 10000000 --fees 25000ujuno -y 
 
 sleep 5
 
